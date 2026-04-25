@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from app.database import supabase
+from app.services.rapport_parental import generer_rapport
 
 router = APIRouter()
 
@@ -93,3 +94,14 @@ def get_orientation(user_id: str):
         "bourses_suggérées": bourses.data,
         "nb_bourses": len(bourses.data)
     }
+
+@router.get("/rapport/{user_id}")
+def get_rapport_parental(user_id: str, langue: str = "fr"):
+    """
+    Génère le rapport parental vocal.
+    langue = fr | moore | dioula | fulfulde
+    """
+    rapport = generer_rapport(user_id, langue)
+    if "erreur" in rapport:
+        raise HTTPException(status_code=404, detail=rapport["erreur"])
+    return rapport
