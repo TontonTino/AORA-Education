@@ -71,9 +71,17 @@ def get_oaa_score(user_id: str):
 
 @router.get("/orientation/{user_id}")
 def get_orientation(user_id: str):
-    """Suggère des bourses selon le score OAA"""
+    """Suggère des bourses selon le profil complet de l'élève"""
+
+    # 1. Récupère le profil de l'élève
+    user_res = supabase.table("users").select("*").eq("id", user_id).execute()
+    if not user_res.data:
+        raise HTTPException(status_code=404, detail="Élève non trouvé")
+    user = user_res.data[0]
+
+    # 2. Récupère le dernier score OAA
     score_res = (supabase.table("scores_oaa")
-                 .select("score_total")
+                 .select("*")
                  .eq("user_id", user_id)
                  .order("calcule_le", desc=True)
                  .limit(1)
@@ -83,16 +91,71 @@ def get_orientation(user_id: str):
         raise HTTPException(status_code=404, detail="Score OAA non calculé")
 
     score = score_res.data[0]["score_total"]
+    est_handicape = user["profil"] in ["non_voyant", "sourd", "muet"]
+    est_rural = user["region"] in [
+        "Dori", "Ouahigouya", "Tenkodogo",
+        "Kaya", "Fada N'Gourma", "Banfora"
+    ]
 
-    bourses = (supabase.table("bourses")
-               .select("*")
-               .lte("score_oaa_min", score)
-               .execute())
+    # 3. Récupère toutes les bourses
+    bourses_res = supabase.table("bourses").select("*").execute()
+    toutes_bourses = bourses_res.data
+
+    # 4. Matching intelligent
+    bourses_match = []
+    for b in toutes_bourses:
+        score_min = b.get("score_oaa_minimum", 50)
+
+        # Filtre score OAA
+        if score < score_min:
+            continue
+
+        # Calcule un score de pertinence
+        pertinence = 0
+
+        # Bonus handicap
+        if est_handicape and b.get("handicap_accepte"):
+            pertinence += 30
+
+        # Bonus zone rurale
+        if est_rural and b.get("zone_rurale_acceptee"):
+            pertinence += 20
+
+        # Bonus score OAA élevé
+        if score >= 75:
+            pertinence += 15
+        elif score >= 60:
+            pertinence += 10
+        elif score >= 45:
+            pertinence += 5
+
+        bourses_match.append({
+            "nom": b["nom"],
+            "organisme": b["organisme"],
+            "montant": b["montant"],
+            "duree": b["duree"],
+            "score_oaa_minimum": score_min,
+            "handicap_accepte": b["handicap_accepte"],
+            "zone_rurale_acceptee": b["zone_rurale_acceptee"],
+            "note_realiste": b["note_realiste"],
+            "source": b["source"],
+            "pertinence": pertinence,
+        })
+
+    # 5. Trie par pertinence et retourne les 5 meilleures
+    bourses_match.sort(key=lambda x: x["pertinence"], reverse=True)
+    top_bourses = bourses_match[:5]
 
     return {
+        "user_id": user_id,
+        "prenom": user["prenom"],
+        "profil": user["profil"],
+        "region": user["region"],
         "score_oaa": score,
-        "bourses_suggérées": bourses.data,
-        "nb_bourses": len(bourses.data)
+        "est_handicape": est_handicape,
+        "est_rural": est_rural,
+        "nb_bourses_eligibles": len(bourses_match),
+        "top_5_bourses": top_bourses,
     }
 
 @router.get("/rapport/{user_id}")
