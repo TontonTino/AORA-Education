@@ -1,104 +1,147 @@
-# app/routers/chat.py
-import asyncio
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel
-import google.generativeai as genai
+import httpx
+import re
 from app.config import settings
 
 router = APIRouter()
 
-genai.configure(api_key=settings.gemini_api_key)
+LECONS = {
+    "maths_fractions": "Les Fractions Simples CE2",
+    "francais_temps": "L Imparfait et le Passe Compose CM1",
+    "histoire_burkina": "Le Burkina Faso Regions et Royaumes 6eme",
+}
 
-model = genai.GenerativeModel(
-    model_name="gemini-2.0-flash",
-    generation_config={
-        "temperature": 0.7,
-        "max_output_tokens": 300,
-    }
-)
+PROMPTS = {
+    "maths_fractions": "Tu es OARA tuteur IA pour eleves burkinabe. Lecon sur les fractions simples CE2. Max 3 phrases. Exemples avec mangue to galette. Encourage toujours. Termine par une question.",
+    "francais_temps": "Tu es OARA tuteur IA pour eleves burkinabe. Lecon sur imparfait et passe compose CM1. Passe compose action terminee. Imparfait habitude repetee. Max 3 phrases. Encourage toujours.",
+    "histoire_burkina": "Tu es OARA tuteur IA pour eleves burkinabe. Lecon sur le Burkina Faso 6eme. 13 regions. Capitale Ouagadougou. Royaume Mossi Mogho Naba. Sankara 1984 Pays des Hommes Integres. Max 3 phrases. Encourage toujours.",
+    "general": "Tu es OARA tuteur IA bienveillant pour eleves burkinabe. Max 3 phrases. Exemples du quotidien burkinabe. Encourage toujours. Termine par une question.",
+}
 
-SYSTEM_PROMPT = """Tu es OARA, tuteur IA pour élèves burkinabè.
-Règles :
-- Réponds en 2-3 phrases maximum, texte brut uniquement
-- Après chaque explication, pose UNE question de compréhension
-- Programme BF : Maths, SVT, Histoire-Géo, Français, Physique
-- Bienveillant, simple, niveau collège/lycée"""
-
-# ── BASE DE CONNAISSANCES LOCALE (fallback si Gemini indispo) ──
-KB = {
-    "pythagore": "Dans un triangle rectangle, c² = a² + b². Le carré de l'hypoténuse vaut la somme des carrés des deux autres côtés. Peux-tu me donner un exemple de triangle avec les côtés 3, 4 et 5 ?",
-    "photosynthese": "La plante capte la lumière du soleil, absorbe l'eau et le CO₂, et produit du glucose et de l'oxygène. Quel gaz la plante rejette-t-elle pendant la photosynthèse ?",
-    "photosynthèse": "La plante capte la lumière du soleil, absorbe l'eau et le CO₂, et produit du glucose et de l'oxygène. Quel gaz la plante rejette-t-elle pendant la photosynthèse ?",
-    "respiration": "La cellule utilise le glucose et l'oxygène pour produire de l'énergie, et rejette du CO₂ et de l'eau. Quel gaz est absorbé pendant la respiration cellulaire ?",
-    "revolution": "La Révolution française commence en 1789 avec la prise de la Bastille le 14 juillet. Elle met fin à la monarchie absolue. En quelle année Napoléon prend-il le pouvoir ?",
-    "révolution": "La Révolution française commence en 1789 avec la prise de la Bastille le 14 juillet. Elle met fin à la monarchie absolue. En quelle année Napoléon prend-il le pouvoir ?",
-    "napoléon": "Napoléon Bonaparte prend le pouvoir en 1799 après la Révolution française. Il devient Empereur des Français en 1804. Quelle bataille célèbre Napoléon a-t-il perdue en 1815 ?",
-    "napoleon": "Napoléon Bonaparte prend le pouvoir en 1799 après la Révolution française. Il devient Empereur des Français en 1804. Quelle bataille célèbre Napoléon a-t-il perdue en 1815 ?",
-    "géographie": "La géographie étudie la surface de la Terre, ses reliefs, ses climats et ses populations. Le Burkina Faso est un pays enclavé d'Afrique de l'Ouest. Quelle est la capitale du Burkina Faso ?",
-    "geographie": "La géographie étudie la surface de la Terre, ses reliefs, ses climats et ses populations. Le Burkina Faso est un pays enclavé d'Afrique de l'Ouest. Quelle est la capitale du Burkina Faso ?",
-    "physique": "La physique étudie les lois de la nature : le mouvement, l'énergie, la lumière et l'électricité. La formule de la vitesse est v = d/t, où d est la distance et t le temps. Si tu parcours 100 km en 2 heures, quelle est ta vitesse ?",
-    "chimie": "La chimie étudie la composition et les transformations de la matière. L'eau est une molécule composée de 2 atomes d'hydrogène et 1 atome d'oxygène : H₂O. Quelle est la formule chimique du dioxyde de carbone ?",
-    "français": "En français, le sujet fait l'action exprimée par le verbe. Pour trouver le sujet, pose la question 'Qui est-ce qui ?' avant le verbe. Dans la phrase 'Les élèves apprennent', quel est le sujet ?",
-    "anglais": "In English, the present simple is used for habits and general truths. We say 'I go to school every day'. Can you make a sentence with the verb 'to study' in the present simple ?",
-    "default": "Je suis OARA, ton tuteur. Je peux t'aider avec : Pythagore, Photosynthèse, Respiration, Révolution française, Géographie, Physique, Chimie, Français ou Anglais. Quel sujet veux-tu réviser ?"
+OFFLINE = {
+    "maths_fractions": "Bonjour ! Aujourd hui on apprend les fractions. Une fraction c est une part d un tout. Tu es pret a commencer ?",
+    "francais_temps": "Bonjour ! Aujourd hui on apprend l imparfait et le passe compose. Tu es pret ?",
+    "histoire_burkina": "Bonjour ! Aujourd hui on parle du Burkina Faso et son histoire. Tu es pret ?",
+    "general": "Bonjour ! Je suis OARA ton tuteur. Quelle matiere veux-tu travailler ?",
 }
 
 
-def get_local_response(message: str) -> str:
-    msg = message.lower()
-    for key in KB:
-        if key in msg:
-            return KB[key]
-    return KB["default"]
-
-
-# ── MODELS ──
-class MessageInput(BaseModel):
+class ChatMessage(BaseModel):
+    user_id: str
     message: str
-    session_id: str | None = None
+    matiere: str = "general"
+    historique: list[dict] = []
 
 
-class MessageOutput(BaseModel):
-    response: str
-    source: str  # "gemini" ou "local_kb"
+def extraire_reponse(msg: dict, matiere: str) -> str:
+    """Extrait le texte de la réponse même pour les modèles reasoning"""
+    # Cas normal : content direct
+    content = msg.get("content")
+    if content:
+        return content
+
+    # Cas modèle reasoning : extrait depuis reasoning_details
+    details = msg.get("reasoning_details") or []
+    for d in details:
+        texte = d.get("text", "")
+        if not texte:
+            continue
+        if "craft:" in texte:
+            return texte.split("craft:")[-1].strip().strip('"')
+        matches = re.findall(r'"([^"]{20,})"', texte)
+        if matches:
+            return matches[-1]
+
+    # Fallback final
+    return OFFLINE.get(matiere, OFFLINE["general"])
 
 
-# ── ENDPOINTS ──
-@router.get("/models")
-async def list_models():
+@router.post("/")
+def chat(body: ChatMessage):
+    prompt = PROMPTS.get(body.matiere, PROMPTS["general"])
+    titre = LECONS.get(body.matiere, "Conversation libre")
+    message_complet = prompt + "\n\nEleve dit : " + body.message
+
     try:
-        models = []
-        for m in genai.list_models():
-            if "generateContent" in m.supported_generation_methods:
-                models.append(m.name)
-        return {"models_compatibles": models}
+        headers = {
+            "Authorization": f"Bearer {settings.openrouter_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://oara-backend.onrender.com",
+            "X-Title": "OARA Tuteur IA",
+        }
+
+        # Liste de modèles standard (pas reasoning) à essayer dans l'ordre
+        modeles = [
+            "liquid/lfm-2.5-1.2b-instruct:free",
+            "google/gemma-4-26b-a4b-it:free",
+            "poolside/laguna-xs.2:free",
+        ]
+
+        reponse_text = None
+
+        for modele in modeles:
+            try:
+                payload = {
+                    "model": modele,
+                    "messages": [{"role": "user", "content": message_complet}],
+                    "max_tokens": 150,
+                }
+                with httpx.Client(timeout=10) as client:
+                    response = client.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers=headers,
+                        json=payload,
+                    )
+                data = response.json()
+
+                if "choices" not in data:
+                    print(f"[{modele}] Pas de choices — on essaie le suivant")
+                    continue
+
+                content = data["choices"][0]["message"].get("content")
+                if not content:
+                    print(f"[{modele}] Content vide — on essaie le suivant")
+                    continue
+
+                reponse_text = content
+                print(f"[OPENROUTER OK] Modèle utilisé : {modele}")
+                print(f"[OPENROUTER OK] Réponse : {reponse_text[:80]}")
+                break
+
+            except Exception as em:
+                print(f"[{modele}] Erreur : {type(em).__name__} — on essaie le suivant")
+                continue
+
+        if not reponse_text:
+            reponse_text = OFFLINE.get(body.matiere, OFFLINE["general"])
+            return {
+                "reponse": reponse_text,
+                "user_id": body.user_id,
+                "matiere": body.matiere,
+                "lecon_titre": titre,
+                "source": "offline_fallback",
+            }
+
+        return {
+            "reponse": reponse_text,
+            "user_id": body.user_id,
+            "matiere": body.matiere,
+            "lecon_titre": titre,
+            "source": "openrouter",
+        }
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[FALLBACK] {type(e).__name__}: {str(e)[:150]}")
+        return {
+            "reponse": OFFLINE.get(body.matiere, OFFLINE["general"]),
+            "user_id": body.user_id,
+            "matiere": body.matiere,
+            "lecon_titre": titre,
+            "source": "offline_fallback",
+        }
 
 
-@router.post("/", response_model=MessageOutput)
-async def send_message(payload: MessageInput):
-    try:
-        loop = asyncio.get_event_loop()
-        prompt = f"{SYSTEM_PROMPT}\n\nÉlève : {payload.message}\nOARA :"
-
-        response = await asyncio.wait_for(
-            loop.run_in_executor(
-                None,
-                lambda: model.generate_content(prompt)
-            ),
-            timeout=5.0  # 5 secondes max — adapté réseau Burkina
-        )
-
-        return MessageOutput(
-            response=response.text.strip(),
-            source="gemini"
-        )
-
-    except Exception as e:
-        # Gemini indispo (quota, timeout, réseau) → fallback local immédiat
-        print(f"[OARA FALLBACK] Gemini indispo ({type(e).__name__}), réponse locale")
-        return MessageOutput(
-            response=get_local_response(payload.message),
-            source="local_kb"
-        )
+@router.get("/lecons")
+def get_lecons():
+    return {"lecons": [{"id": k, "titre": v} for k, v in LECONS.items()]}
