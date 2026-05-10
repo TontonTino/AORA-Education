@@ -1,8 +1,16 @@
-# AORA
+# oara
 
-Plateforme éducative inclusive pour élèves handicapés au Burkina Faso.
+A new Flutter project.
 
-## Le projet
-Tuteur vocal IA · Navigation sans visuel · Score OAA adaptatif · Audio-Reporting parents
+## Getting Started
 
-## Jour J : 21 mai 2026 · SIAO Ouagadougou# AORA-Education
+This project is a starting point for a Flutter application.
+
+A few resources to get you started if this is your first Flutter project:
+
+- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
+- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+
+For help getting started with Flutter development, view the
+[online documentation](https://docs.flutter.dev/), which offers tutorials,
+samples, guidance on mobile development, and a full API reference.
